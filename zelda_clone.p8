@@ -125,30 +125,41 @@ function b_new(_btn)
    return {
       btn = _btn,
       f_last = 0,
-      f_held = 0,
+      f_held = 0
    }
 end
 
 function b_update(_b)
    if btn(_b.btn) then
       _b.f_held += 1
-      _b.f_last = 0
    else
+      if _b.f_held > 0 then
+	 _b.f_last = 0
+      end
       _b.f_held = 0
       _b.f_last += 1
    end
 end
 
 function b_down(_b)
-   return _b.f_held > 0  
+   return _b.f_held > 0
 end
+
+function b_up(_b)
+   return _b.f_held == 0
+end
+
+-- function b_press(_b)
+--    return _b.f_held > 0
+--    and _b.f_last >= 4
+-- end
 
 -- vector
 function v_new(_x, _y)
    return { x = _x, y = _y }
 end
 
-function v_apply(_a, _b)
+function v_applyto(_a, _b)
    _a.x = _b.x
    _a.y = _b.y
 end
@@ -183,6 +194,10 @@ function v_scaleto(_a, _s)
    _a.x *= _s
    _a.y *= _s
    return _a
+end
+
+function v_scale(_a, _s)   
+   return v_new(_a.x*_s, _a.y*_s)
 end
 
 function v_threshto(_a, _t)
@@ -229,7 +244,6 @@ e_data = {
 				       return b_down(_b_dir)
 	 end)
 	 local is_b_dir_down = #b_dirs_down > 0 
-	 
 	 local is_b_z_down = b_down(_self.b_z)
 	 local is_b_x_down = b_down(_self.b_x)
 
@@ -411,13 +425,13 @@ e_data = {
 	 -- todo this should be a state
 	 -- pickup
 	 if _self.pickup then
-	    v_apply(_self.pickup, _self.pos)
+	    v_applyto(_self.pickup.pos, _self.pos)
 	    -- throw
-	    if btnp(5) then
+	    if b_up(_self.b_x) then
 	       _self.state = "throwing"
 	       local dir_vec = dir_map[_self.dir+1]
-	       _self.pickup.vx = dir_vec.x*6
-	       _self.pickup.vy = dir_vec.y*6
+	       v_applyto(_self.pickup.vel,
+			 v_scale(dir_vec, 6))
 	       _self.pickup.state = "thrown"
 	       _self.pickup = nil
 	       _self.throwf = _self.throwttl
@@ -447,17 +461,20 @@ e_data = {
       b_z=b_new(4),
       b_x=b_new(5),
       
-      pos = v_new(57,56),     
+      pos = v_new(57,56),
+      vel = v_new(0,0),
       vel_move = v_new(0,0),
       vel_hit = v_new(0,0),
-      vel = v_new(0,0),
-      
+	    
       lx = 8,
       ly = 8,
+      
       c = 3,
-      -- todo let's make a dirs enum
+      
       dir = 2,
+      
       state = "idle",
+      
       ianim = a_new(30,
 		    function (_t, _args)
 		       if flr(_t.f/4) % 2 == 0 then
@@ -474,6 +491,7 @@ e_data = {
       -- todo this is awkward encaps
       prev_z = false,
       type = "player",
+      
       -- todo encapsulate as timers
       animf = 0,
       throwttl = 10,
@@ -482,16 +500,17 @@ e_data = {
 	 if _other.type == "enemy"
 	    and not a_isactive(_self.ianim) then
 	    local u = v_unit(v_sub(_self.center, _other.center))
-	    v_apply(_self.vel_hit, v_scaleto(u, 4))
+	    v_applyto(_self.vel_hit, v_scaleto(u, 4))
 	    a_activate(_self.ianim)
 	 elseif _other.type == "geometry" then	    
 	    v_subto(_self.pos, _self.vel)
 	 elseif _other.type == "pickup" then
-	    if btnp(5) and _self.state != "throwing" then
+	    -- todo this state logic should prob not be here
+	    if b_down(_self.b_x)
+	       and _self.state != "throwing" then
 	       _self.pickup = _other
 	    end
-         end
-	 
+         end	 
       end
      
    },
@@ -579,9 +598,7 @@ e_data = {
 	    if _self.iframe == 0
 	       and _self.hp == 0 then
 	       e_drop(_self)
-	       local particle = e_init(e_data.particle)
-	       particle.x = _self.pos.x
-	       particle.y = _self.pos.y
+	       local particle = e_init(e_data.particle, _self.pos)
 	    end
 	 end
 
@@ -677,6 +694,7 @@ e_data = {
    particle = {
       function (_self)
 	 if _self.f == 0 then
+	    _self.pos = _self.args[1]
 	    -- need otherwise all particle
 	    _self.particles = {}
 	    for i = 1, 3 do
@@ -704,8 +722,7 @@ e_data = {
 	    circfill(particle.x, particle.y, lerp(_self.f/_self.ttl,2,0), flr(rnd(16)))
 	 end
       end,
-      x = 0,
-      y = 0,
+      pos = v_new(0,0),
       ttl = 20
    },
 
@@ -715,31 +732,31 @@ e_data = {
 	    _self.pos.x = _self.args[1]
 	    _self.pos.y = _self.args[2]
 	 end
+	 
 	 if _self.state == "thrown" then
-	    _self.pos.x += _self.vel.x
-	    _self.pos.y += _self.vel.y
-	    _self.vel.x *= .75
-	    _self.vel.y *= .75
+	    v_addto(_self.pos, _self.vel)
+	    v_scaleto(_self.vel, .75)
 	    if thresh(_self.vel.x, .9) == 0
 	       and thresh(_self.vel.y, .9) == 0 then
 	       e_drop(_self)
-	       local particle = e_init(e_data.particle)
-	       particle.x = _self.pos.x
-	       particle.y = _self.pos.y
+	       local particle = e_init(e_data.particle, _self.pos)
 	    end
 	 end
-      end,      
+      end,
+      
       function (_self)
 	 spr(64,round(_self.pos.x),round(_self.pos.y))
       end,
-      x = 70,
-      y = 40,
-      vx = 0,
-      vy = 0,
+
+      pos = v_new(70, 40),
+      vel = v_new(0, 0),
+      
       lx = 8,
       ly = 8,
+      
       type = "pickup",
       state = "idle",
+      
       on_coll = function () end
    }
 }
@@ -804,7 +821,7 @@ geometry_map = {
 
 function _init()
    player = e_init(e_data.player)
-   -- e_init(e_data.pickup, 80, 63)
+   e_init(e_data.pickup, 80, 63)
    -- e_init(e_data.pickup, 80, 71)
    -- e_init(e_data.pickup, 80, 55)   
    dummy = e_init(e_data.dummy)
