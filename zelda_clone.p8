@@ -5,7 +5,7 @@ __lua__
 function noop()
 end
 
-function dcopy(_o)
+function shallow_copy(_o)
    local r = {}
    for key, value in pairs(_o) do
       r[key] = value
@@ -22,22 +22,24 @@ function any(_list, _predicate)
    return false
 end
 
-function filter(_list, _predicate)
+function filter(_list, _predicate, _o_include_index)
    local r = {}
-   for item in all(_list) do
-      if _predicate(item) then
-	 add(r, item)
-      end
+   for i=1, #_list do
+      local item = _list[i]
+      if _predicate(item, i) then
+	 add(r, _o_include_index and
+	     {item=item, i=i} or item)
+      end   
    end
    return r
 end
 
 function lerp(_p, _from, _to)
-   return _from*(1-_p)+_p*_to
+   return clamp(_from*(1-_p)+_p*_to, _from, _to)
 end
 
 function round(_x)
-   return flr(_x+.5)
+   return flr(_x)
 end
 
 function thresh(_x, _t)
@@ -47,13 +49,6 @@ end
 function clamp(_x, _min, _max)
    return _x <= _min and _min or _x >= _max and _max or _x
 end
-
-dir_map = {
-   { x = -1, y = 0 },
-   { x = 1, y = 0 },
-   { x = 0, y = -1 },
-   { x = 0, y = 1 }
-}
 
 function sign(_x)
    return _x < 0 and -1
@@ -156,7 +151,7 @@ end
 
 -- vector
 function v_new(_x, _y)
-   return { x = _x, y = _y }
+   return { x = _x or 0, y = _y or 0 }
 end
 
 function v_applyto(_a, _b)
@@ -215,11 +210,36 @@ function v_unit(_a)
    return v_new(_a.x/m, _a.y/m)
 end
 
+function v_polar(_angle, _s)
+   return v_new(cos(_angle)*_s, sin(_angle)*_s)
+end
+
+dir_enum = {
+   left = 1,
+   right = 2,
+   up = 3,
+   down = 4
+}
+
+dir_v_map = {
+   v_new(-1,0),
+   v_new(1,0),
+   v_new(0,-1),
+   v_new(0,1),
+}
+
+dir_a_map = {
+      .5,
+      .0,
+      .25,
+      .75
+}
+
 function e_rectpos(_e)
    return round(_e.pos.x),
       round(_e.pos.y),
-      round(_e.pos.x+_e.lx-(1*sign(_e.lx))),
-      round(_e.pos.y+_e.ly-(1*sign(_e.ly)))
+      round(_e.pos.x+_e.width-(1*sign(_e.width))),
+      round(_e.pos.y+_e.height-(1*sign(_e.height)))
 end
 
 function e_rectfill(_e)
@@ -227,10 +247,91 @@ function e_rectfill(_e)
    rectfill(e_rectpos(_e))
 end
 
+function e_move_geometry(_e)
+   function collcheck(_x, _y, _width, _height)
+      local tl = { x=_x, y=_y }
+      local tr = { x=_x+_width-1, y=_y }
+      local bl = { x=_x, y=_y+_height-1 }
+      local br = { x=_x+_width-1, y=_y+_height-1}
+      local vertices = {tl, tr, bl, br}
+
+      for vertex in all(vertices) do	    
+	 if geometry_map
+	 [flr(vertex.y/8)+1]
+	 [flr(vertex.x/8)+1] == 1 then
+	    return true
+	 end
+      end
+      return false
+   end
+
+   local new_pos = v_add(_e.pos, _e.vel)
+   
+   local x_coll = collcheck(_e.pos.x+_e.vel.x,
+			    _e.pos.y,
+			    _e.width,
+			    _e.height)
+   
+   local y_coll = collcheck(_e.pos.x,
+			    _e.pos.y+_e.vel.y,
+			    _e.width,
+			    _e.height)
+
+   -- for diagonal coll
+   local xy_coll = collcheck(_e.pos.x+_e.vel.x,
+			     _e.pos.y+_e.vel.y,
+			     _e.width,
+			     _e.height)
+   
+   if not x_coll and not y_coll and xy_coll then
+   else
+      if not x_coll then
+	 _e.pos.x += _e.vel.x
+      end
+      if not y_coll then
+	 _e.pos.y += _e.vel.y
+      end
+   end
+
+   -- if there was a x_coll or y_coll
+   -- there was an intention to move that direction
+   -- try nudge
+   -- y_coll check up down left and right side
+   if y_coll then
+      for i=-1, 1, 2 do
+	 local nudge_xy_coll =
+	    collcheck(_e.pos.x+_e.vel.x+i,
+		      _e.pos.y+_e.vel.y,
+		      _e.width,
+		      _e.height)
+
+	 if not nudge_xy_coll then
+	    _e.pos.x += _e.vel.x+i
+	    _e.pos.y += _e.vel.y	       
+	 end
+      end
+   end
+
+   -- x_coll check up down left and right side
+   if x_coll then
+      for i=-1, 1, 2 do
+	 local nudge_xy_coll =
+	    collcheck(_e.pos.x+_e.vel.x,
+		      _e.pos.y+_e.vel.y+i,
+		      _e.width,
+		      _e.height)
+
+	 if not nudge_xy_coll then
+	    _e.pos.x += _e.vel.x
+	    _e.pos.y += _e.vel.y+i	       
+	 end
+      end
+   end
+end
+
 e_data = {
    player = {
       function (_self)
-
 	 -- input
 	 for b in all(_self.b_dirs) do
 	    b_update(b)
@@ -245,19 +346,31 @@ e_data = {
 	 end)
 	 local is_b_dir_down = #b_dirs_down > 0 
 	 local is_b_z_down = b_down(_self.b_z)
-	 local is_b_x_down = b_down(_self.b_x)
+	 local is_b_x_down = b_down(_self.b_x)	 
+	 	 
+	 -- setup
+	 _self.prev_dir = _self.dir
+	 v_applyto(_self.prev_vel, _self.vel)
+	 v_zero(_self.vel)
+	 v_zero(_self.vel_move)
 
+	 -- helpers
 	 local update_vel_move = function ()
 	    for b in all(b_dirs_down) do
-	       local dir_vec = dir_map[b.btn+1]
-	       _self.dir = b.btn
+	       local dir_vec = dir_v_map[b.btn+1]
 	       v_addto(_self.vel_move, dir_vec)
 	    end
 	 end
-	 
-	 -- todo tidy up/encapsualte resets? maybe not
-	 v_zero(_self.vel)
-	 v_zero(_self.vel_move)
+
+	 local update_dir = function ()
+	    if #b_dirs_down > 0 and
+	       not any(b_dirs_down, function (_b)
+			  return _b.btn == _self.dir-1
+		      end)
+	    then
+	       _self.dir = b_dirs_down[1].btn+1
+	    end	
+	 end
 
 	 -- todo encapsulate state
 	 if _self.state == "idle" then
@@ -276,6 +389,7 @@ e_data = {
 	       _self.state = "idle"
 	    else
 	       update_vel_move()
+	       update_dir()
 	    end
 	 end
 
@@ -334,86 +448,8 @@ e_data = {
 	 v_addto(_self.vel, _self.vel_hit)
 	 
 	 -- todo alot
-	 function collcheck(_x, _y, _lx, _ly)
-	    local tl = { x=_x, y=_y }
-	    local tr = { x=_x+_lx-1, y=_y }
-	    local bl = { x=_x, y=_y+_ly-1 }
-	    local br = { x=_x+_lx-1, y=_y+_ly-1}
-	    local vertices = {tl, tr, bl, br}
-
-	    for vertex in all(vertices) do	    
-	       if geometry_map
-	       [flr(vertex.y/8)+1]
-	       [flr(vertex.x/8)+1] == 1 then
-		  return true
-	       end
-	    end
-	    return false
-	 end
-
-	 local new_pos = v_add(_self.pos, _self.vel)
+	 e_move_geometry(_self)
 	 
-	 local x_coll = collcheck(_self.pos.x+_self.vel.x,
-				  _self.pos.y,
-				  _self.lx,
-				  _self.ly)
-	 
-	 local y_coll = collcheck(_self.pos.x,
-				  _self.pos.y+_self.vel.y,
-				  _self.lx,
-				  _self.ly)
-
-	 -- for diagonal coll
-	 local xy_coll = collcheck(_self.pos.x+_self.vel.x,
-				   _self.pos.y+_self.vel.y,
-				   _self.lx,
-				   _self.ly)
-
-	 
-	 if not x_coll and not y_coll and xy_coll then
-	 else
-	    if not x_coll then
-	       _self.pos.x += _self.vel.x
-	    end
-	    if not y_coll then
-	       _self.pos.y += _self.vel.y
-	    end
-	 end
-
-	 -- if there was a x_coll or y_coll
-	 -- there was an intention to move that direction
-	 -- try nudge
-	 -- y_coll check up down left and right side
-	 if y_coll then
-	    for i=-1, 1, 2 do
-	       local nudge_xy_coll =
-		  collcheck(_self.pos.x+_self.vel.x+i,
-			    _self.pos.y+_self.vel.y,
-			    _self.lx,
-			    _self.ly)
-
-	       if not nudge_xy_coll then
-		  _self.pos.x += _self.vel.x+i
-		  _self.pos.y += _self.vel.y	       
-	       end
-	    end
-	 end
-
-	 -- x_coll check up down left and right side
-	 if x_coll then
-	    for i=-1, 1, 2 do
-	       local nudge_xy_coll =
-		  collcheck(_self.pos.x+_self.vel.x,
-			    _self.pos.y+_self.vel.y+i,
-			    _self.lx,
-			    _self.ly)
-
-	       if not nudge_xy_coll then
-		  _self.pos.x += _self.vel.x
-		  _self.pos.y += _self.vel.y+i	       
-	       end
-	    end
-	 end
 
 	 -- todo friction
 	 v_scaleto(_self.vel_hit, .75)
@@ -429,7 +465,7 @@ e_data = {
 	    -- throw
 	    if b_up(_self.b_x) then
 	       _self.state = "throwing"
-	       local dir_vec = dir_map[_self.dir+1]
+	       local dir_vec = dir_v_map[_self.dir+1]
 	       v_applyto(_self.pickup.vel,
 			 v_scale(dir_vec, 6))
 	       _self.pickup.state = "thrown"
@@ -449,6 +485,7 @@ e_data = {
       end,
       
       function (_self)
+	 print(_self.dir)
 	 e_rectfill(_self)
       end,
 
@@ -462,16 +499,17 @@ e_data = {
       b_x=b_new(5),
       
       pos = v_new(57,56),
-      vel = v_new(0,0),
-      vel_move = v_new(0,0),
-      vel_hit = v_new(0,0),
+      prev_vel = v_new(),
+      vel = v_new(),
+      vel_move = v_new(),
+      vel_hit = v_new(),
 	    
-      lx = 8,
-      ly = 8,
+      width = 8,
+      height = 8,
       
       c = 3,
       
-      dir = 2,
+      dir = 3,
       
       state = "idle",
       
@@ -517,63 +555,37 @@ e_data = {
 
    -- dir
    attack = {
-      
       function (_self)
+	 local wielder = _self.args[1]
+	 local dir = wielder.dir
+	 local dim = v_scale(dir_v_map[dir], 5)
+	 local dir_angle = dir_a_map[wielder.dir]
+	 
 	 if _self.f == 0 then
-	    _self.wielder = _self.args[1]
-	    if _self.wielder.dir == 0 then
-	       _self.lx = -5
-	       _self.ly = 1
-	       _self.aoffset = .25
-	       _self.xo = -1
-	    end
-	    if _self.wielder.dir == 1 then
-	       _self.lx = 5
-	       _self.ly = 1
-	       _self.aoffset = -.25
-	       _self.yo = -1
-	    end
-	    if _self.wielder.dir == 2 then
-	       _self.lx = 1
-	       _self.ly = -5
-	       _self.aoffset = 0
-	       _self.xo = -1
-	       _self.yo = -1
-	    end
-	    if _self.wielder.dir == 3 then
-	       _self.lx = 1
-	       _self.ly = 5
-	       _self.aoffset = .5
-	    end
+	    _self.width = dim.x
+	    _self.height = dim.y
 	 end
 
-	 if _self.f <= _self.swing_duration then
-	    local a = lerp(_self.f/_self.swing_duration
-			   , 0, .35) + _self.aoffset
-	    _self.pos.x = round(_self.wielder.center.x+_self.xo)+cos(a)*5
-	    _self.pos.y = round(_self.wielder.center.y+_self.yo)+sin(a)*5
-	 elseif _self.f > _self.swing_duration then
-	    local a = lerp(1, 0, .35) + _self.aoffset
-	    _self.pos.x = round(_self.wielder.center.x+_self.xo)+cos(a)*5
-	    _self.pos.y = round(_self.wielder.center.y+_self.yo)+sin(a)*5
-	 end
+	 local a = lerp(_self.f/_self.swing_duration,
+			-.25, .1) + dir_angle
 
+	 v_applyto(_self.pos,
+		   v_add(wielder.center, v_polar(a, 5)))
+	 
 	 if _self.f >
-	    _self.swing_duration + _self.charge_duration then
+	    _self.swing_duration + _self.charge_duration
+	 then
 	    _self.c = _self.f % 2 == 0 and 9 or 7   
 	 end
       end,
       
       function (_self)
 	 e_rectfill(_self)
-      end,      
+      end,
+      
       swing_duration = 6,
       charge_duration = 10,
       pos = v_new(0,0),
-      xo = 0,
-      yo = 0,
-      lx = 1,
-      ly = -4,
       c = 7,
       type = "player_attack",      
       on_coll = function(_self, _other)
@@ -603,29 +615,17 @@ e_data = {
 	 end
 
 	 if _self.iframe == 0 then
-	    -- chase player
-	    -- local uv = v_unit(player.center.x - _self.pos.x,
-	    -- 		    player.center.y - _self.pos.y)
-	    -- _self.vel_move.x = uv.x*.5
-	    -- _self.vel_move.y = uv.y*.5
-	    -- _self.vel.x += _self.vel_move.x
-	    -- _self.vel.y += _self.vel_move.y
-
 	    -- wonder behavior
 	    -- set wonder point
-	    if _self.wonder_x == 0 or
-	       thresh(_self.wonder_x - _self.pos.x, .5) == 0 and
-	       thresh(_self.wonder_y - _self.pos.y, .5) == 0 then
+	    if _self.wonder.x == 0 or
+	       thresh(_self.wonder.x - _self.pos.x, .5) == 0 and
+	       thresh(_self.wonder.y - _self.pos.y, .5) == 0 then
 	       local a = rnd(1)
-	       _self.wonder_x = clamp(round(_self.pos.x+cos(a)*20), 0, 127)
-	       _self.wonder_y = clamp(round(_self.pos.y+sin(a)*20), 0, 127)
-	    end	    
-	    -- local uv = v_unit(_self.wonder_x - _self.pos.x,
-	    -- 		    _self.wonder_y - _self.pos.y)
-	    -- _self.vel_hit.x = uv.x*.5
-	    -- _self.vel_hit.y = uv.y*.5
-	    -- _self.vel.x += _self.vel_hit.x
-	    -- _self.vel.y += _self.vel_hit.y
+	       _self.wonder.x =
+		  clamp(round(_self.pos.x+cos(a)*20), 0, 127)
+	       _self.wonder.y =
+		  clamp(round(_self.pos.y+sin(a)*20), 0, 127)
+	    end
 	 end
 	 
 	 _self.vel.x += _self.vel_hit.x
@@ -639,9 +639,8 @@ e_data = {
 	    _self.vel_hit.x = 0
 	    _self.vel_hit.y = 0
 	 end
-	 
-	 _self.pos.x += _self.vel.x
-	 _self.pos.y += _self.vel.y
+
+	 e_move_geometry(_self)
       end,
 
       function(_self)
@@ -649,12 +648,11 @@ e_data = {
       end,
 
       pos = v_new(30, 35),
-      lx = 8,
-      ly = 8,
+      width = 8,
+      height = 8,
       vel = v_new(0,0),
       vel_hit = v_new(0,0),
-      wonder_x = 0,
-      wonder_y = 0,
+      wonder = v_new(0,0),
       
       c = 4,
       iframe = 0,
@@ -680,11 +678,10 @@ e_data = {
 	    _self.vel_hit.y *= .5
 	 elseif _other.type == "pickup"
 	    and _other.state == "thrown"
-	    and _self.iframe == 0 then	    
-	    local u = v_unit(_self.center.x - _other.center.x,
-			   _self.center.y - _other.center.y)
-	    _self.vel_hit.x = u.x*5
-	    _self.vel_hit.y = u.y*5
+	    and _self.iframe == 0 then
+	    local u = v_unit(v_sub(_self.center,
+				   _other.center))
+	    v_applyto(_self.vel_hit, v_scale(u, 5))
 	    _self.iframe = _self.iframe_ttl
 	    _self.hp -= 1
 	 end
@@ -699,18 +696,16 @@ e_data = {
 	    _self.particles = {}
 	    for i = 1, 3 do
 	       add(_self.particles, {
-		      x = _self.pos.x+(rnd(1)-.5),
-		      y = _self.pos.y+(rnd(1)-.5),
-		      vx = cos(lerp(i/3,0,1))*1.4+(rnd(1)-.5),
-		      vy = sin(lerp(i/3,0,1))*1.4+(rnd(1)-.5)
+		      pos = v_new(_self.pos.x+(rnd(1)-.5),
+				  _self.pos.y+(rnd(1)-.5)),
+		      vel = v_new(cos(lerp(i/3,0,1))*1.4+(rnd(1)-.5),
+				  sin(lerp(i/3,0,1))*1.4+(rnd(1)-.5))
 	       })
 	    end
 	 end
 	 for particle in all(_self.particles) do
-	    particle.x += particle.vx
-	    particle.y += particle.vy
-	    particle.vx *= .75
-	    particle.vy *= .75
+	    v_addto(particle.pos, particle.vel)
+	    v_scaleto(particle.vel, .75)
 	 end
 	 if _self.f == _self.ttl then
 	    e_drop(_self)
@@ -718,8 +713,14 @@ e_data = {
       end,
       function (_self)
 	 for particle in all(_self.particles) do
-	    circfill(particle.x, particle.y, lerp(_self.f/_self.ttl,3,0), flr(rnd(16)))
-	    circfill(particle.x, particle.y, lerp(_self.f/_self.ttl,2,0), flr(rnd(16)))
+	    circfill(particle.pos.x,
+		     particle.pos.y,
+		     lerp(_self.f/_self.ttl,3,0),
+		     flr(rnd(16)))
+	    circfill(particle.pos.x,
+		     particle.pos.y,
+		     lerp(_self.f/_self.ttl,2,0),
+		     flr(rnd(16)))
 	 end
       end,
       pos = v_new(0,0),
@@ -751,8 +752,8 @@ e_data = {
       pos = v_new(70, 40),
       vel = v_new(0, 0),
       
-      lx = 8,
-      ly = 8,
+      width = 8,
+      height = 8,
       
       type = "pickup",
       state = "idle",
@@ -764,7 +765,7 @@ e_data = {
 entities = {}
 
 function e_init(_e_data, ...)
-   local e = dcopy(_e_data)
+   local e = shallow_copy(_e_data)
    e.f = 0
    e.alive = true
    e.args = {...}
@@ -781,33 +782,14 @@ player = nil
 dummy = nil
 pickup = nil
 
-geometry_map = {
-   {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-   {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-   {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-}
-
 -- geometry_map = {
+--    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+--    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+--    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
---    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
---    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
---    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
---    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
@@ -819,27 +801,46 @@ geometry_map = {
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 -- }
 
+geometry_map = {
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+} 
+
 function _init()
    player = e_init(e_data.player)
-   e_init(e_data.pickup, 80, 63)
+   --e_init(e_data.pickup, 80, 63)
    -- e_init(e_data.pickup, 80, 71)
    -- e_init(e_data.pickup, 80, 55)   
-   dummy = e_init(e_data.dummy)
+   --dummy = e_init(e_data.dummy)
 end
 
 function rectcoll(_coll_a, _coll_b)
    if _coll_a != _coll_b then
-      local ax1 = round(min(_coll_a.pos.x, _coll_a.pos.x + _coll_a.lx))
-      local ax2 = round(max(_coll_a.pos.x, _coll_a.pos.x + _coll_a.lx))
+      local ax1 = round(min(_coll_a.pos.x, _coll_a.pos.x + _coll_a.width))
+      local ax2 = round(max(_coll_a.pos.x, _coll_a.pos.x + _coll_a.width))
 
-      local bx1 = round(min(_coll_b.pos.x, _coll_b.pos.x + _coll_b.lx))
-      local bx2 = round(max(_coll_b.pos.x, _coll_b.pos.x + _coll_b.lx))
+      local bx1 = round(min(_coll_b.pos.x, _coll_b.pos.x + _coll_b.width))
+      local bx2 = round(max(_coll_b.pos.x, _coll_b.pos.x + _coll_b.width))
 
-      local ay1 = round(min(_coll_a.pos.y, _coll_a.pos.y + _coll_a.ly))
-      local ay2 = round(max(_coll_a.pos.y, _coll_a.pos.y + _coll_a.ly))
+      local ay1 = round(min(_coll_a.pos.y, _coll_a.pos.y + _coll_a.height))
+      local ay2 = round(max(_coll_a.pos.y, _coll_a.pos.y + _coll_a.height))
 
-      local by1 = round(min(_coll_b.pos.y, _coll_b.pos.y + _coll_b.ly))
-      local by2 = round(max(_coll_b.pos.y, _coll_b.pos.y + _coll_b.ly))
+      local by1 = round(min(_coll_b.pos.y, _coll_b.pos.y + _coll_b.height))
+      local by2 = round(max(_coll_b.pos.y, _coll_b.pos.y + _coll_b.height))
 
       if ax1 < bx2 and ax2 > bx1
 	 and ay1 < by2 and ay2 > by1 then
@@ -857,10 +858,10 @@ function _update60()
       entity[1](entity)
       entity.f += 1
       -- determine center
-      if entity.lx and entity.ly then
+      if entity.width and entity.height then
 	 entity.center = v_add(entity.pos,
-			       v_new((entity.lx/2),
-				  (entity.ly/2)))
+			       v_new((entity.width/2),
+				  (entity.height/2)))
       end
    end
 
