@@ -5,10 +5,14 @@ __lua__
 function noop()
 end
 
-function shallow_copy(_o)
+function deep_copy(_o)
    local r = {}
    for key, value in pairs(_o) do
-      r[key] = value
+      if type(value) == "table" then
+	 r[key] = deep_copy(value)
+      else
+	 r[key] = value
+      end
    end
    return r
 end
@@ -36,10 +40,6 @@ end
 
 function lerp(_p, _from, _to)
    return clamp(_from*(1-_p)+_p*_to, _from, _to)
-end
-
-function round(_x)
-   return flr(_x)
 end
 
 function thresh(_x, _t)
@@ -195,6 +195,10 @@ function v_scale(_a, _s)
    return v_new(_a.x*_s, _a.y*_s)
 end
 
+function v_flr(_a)
+   return v_new(flr(_a.x), flr(_a.y))
+end
+
 function v_threshto(_a, _t)
    _a.x = thresh(_a.x, _t)
    _a.y = thresh(_a.y, _t)
@@ -236,10 +240,10 @@ dir_a_map = {
 }
 
 function e_rectpos(_e)
-   return round(_e.pos.x),
-      round(_e.pos.y),
-      round(_e.pos.x+_e.width-(1*sign(_e.width))),
-      round(_e.pos.y+_e.height-(1*sign(_e.height)))
+   return flr(_e.pos.x),
+      flr(_e.pos.y),
+      flr(_e.pos.x+_e.width-(1*sign(_e.width))),
+      flr(_e.pos.y+_e.height-(1*sign(_e.height)))
 end
 
 function e_rectfill(_e)
@@ -249,16 +253,13 @@ end
 
 function e_move_geometry(_e)
    function collcheck(_x, _y, _width, _height)
-      local tl = { x=_x, y=_y }
-      local tr = { x=_x+_width-1, y=_y }
-      local bl = { x=_x, y=_y+_height-1 }
-      local br = { x=_x+_width-1, y=_y+_height-1}
+      local tl = v_new(_x, _y)
+      local tr = v_new(_x+_width-1, _y)
+      local bl = v_new(_x, _y+_height-1)
+      local br = v_new(_x+_width-1, _y+_height-1)
       local vertices = {tl, tr, bl, br}
-
       for vertex in all(vertices) do	    
-	 if geometry_map
-	 [flr(vertex.y/8)+1]
-	 [flr(vertex.x/8)+1] == 1 then
+	 if geometry_get(vertex) > 0 then
 	    return true
 	 end
       end
@@ -346,7 +347,13 @@ e_data = {
 	 end)
 	 local is_b_dir_down = #b_dirs_down > 0 
 	 local is_b_z_down = b_down(_self.b_z)
-	 local is_b_x_down = b_down(_self.b_x)	 
+	 local is_b_x_down = b_down(_self.b_x)
+
+	 local v_at_dir =
+	    v_add(_self.center,
+		  v_scale(dir_v_map[_self.dir],
+			  _self.height/2+1))
+	 local geometry_at_dir = geometry_get(v_at_dir)
 	 	 
 	 -- setup
 	 _self.prev_dir = _self.dir
@@ -356,9 +363,11 @@ e_data = {
 
 	 -- helpers
 	 local update_vel_move = function ()
-	    for b in all(b_dirs_down) do
-	       local dir_vec = dir_v_map[b.btn+1]
-	       v_addto(_self.vel_move, dir_vec)
+	    if v_mag(_self.vel_geometry_bounce) == 0 then
+	       for b in all(b_dirs_down) do
+		  local dir_vec = dir_v_map[b.btn+1]
+		  v_addto(_self.vel_move, dir_vec)
+	       end
 	    end
 	 end
 
@@ -372,19 +381,31 @@ e_data = {
 	    end	
 	 end
 
-	 -- todo encapsulate state
-	 if _self.state == "idle" then
-	    if is_b_z_down then
-	       _self.state = "init_attack"
-	    elseif is_b_dir_down then
-	       _self.state = "moving"
+	 function pickup()
+	    if geometry_at_dir == 2 then
+	       geometry_set(v_at_dir, 0)
+	       _self.pickup = e_init(e_data.pickup)
+	       _self.state = "pickup"
 	    end
 	 end
 
 	 -- todo encapsulate state
+	 if _self.state == "idle" then
+	    if is_b_z_down then
+	       _self.state = "init_attack"
+	    elseif is_b_x_down then
+	       pickup()
+	    elseif is_b_dir_down then
+	       _self.state = "moving"
+	    end
+	 end
+	 
+	 -- todo encapsulate state
 	 if _self.state == "moving" then
 	    if is_b_z_down then
 	       _self.state = "init_attack"
+	    elseif is_b_x_down then
+	       pickup()
 	    elseif not is_b_dir_down then
 	       _self.state = "idle"
 	    else
@@ -406,7 +427,9 @@ e_data = {
 
 	 -- todo encapsulate state
 	 if _self.state == "init_attack" then
-	    local attack = e_init(e_data.attack, _self)
+	    local attack = e_init(e_data.attack,
+				  _self,
+				  _self.dir)
 	    _self.attack = attack
 	    _self.state = "attack"
 	 end
@@ -427,17 +450,55 @@ e_data = {
 
 	 -- todo encapsulate state
 	 if _self.state == "hold_attack" then
-	    update_vel_move()
+	    if geometry_at_dir != 0 then
+	       v_applyto(_self.vel_geometry_bounce,
+			 v_scaleto(
+			    v_unit(
+			       v_sub(_self.center, v_at_dir)), 1))
+	    else
+	       update_vel_move()
+	    end
+	    
 	    -- todo better input system for z/x keys
-	    if not is_b_z_down then
+	    if not is_b_z_down then	       
+	       if _self.attack.f >
+		  _self.attack.swing_duration
+		  + _self.attack.charge_duration then
+		  _self.charge_attack = {}
+		  for i=1, 4 do
+		     add(_self.charge_attack,
+			 e_init(e_data.attack,
+				_self,
+				i,
+				true))
+		  end
+		  _self.state = "charge_attack"
+	       else
+		  _self.state = "idle"
+	       end
 	       e_drop(_self.attack)
 	       _self.attack = nil
-	       if is_b_dir_down then
-		  _self.state = "idle"
-	       else
-		  _self.state = "moving"		  
-	       end
 	    end
+	 end
+
+	 if _self.state == "charge_attack" then
+	    if _self.charge_attack[1].f ==
+	       _self.charge_attack[1].swing_duration+
+	       _self.charge_attack[1].charge_duration
+	    then
+	       for attack in all(_self.charge_attack) do
+		  e_drop(attack)
+	       end
+	       _self.attacks = {}
+	       _self.state = "idle"
+	    end
+	 end
+
+	 -- todo this should be a state
+	 -- pickup
+	 if _self.state == "pickup" then
+	    update_vel_move()
+	    update_dir()
 	 end
 
 	 -- timer system for iframes
@@ -446,28 +507,18 @@ e_data = {
 	 -- todo apply function and comments for v types
 	 v_addto(_self.vel, _self.vel_move)
 	 v_addto(_self.vel, _self.vel_hit)
+	 v_addto(_self.vel, _self.vel_geometry_bounce)
 	 
-	 -- todo alot
 	 e_move_geometry(_self)
-	 
 
-	 -- todo friction
-	 v_scaleto(_self.vel_hit, .75)
-	 -- todo vector thresh3)
-	 v_threshto(_self.vel_hit, .3)
-	 -- todo z x
-	 _self.prev_z = z
-
-	 -- todo this should be a state
-	 -- pickup
-	 if _self.pickup then
+	 if _self.state == "pickup" then
 	    v_applyto(_self.pickup.pos, _self.pos)
 	    -- throw
 	    if b_up(_self.b_x) then
 	       _self.state = "throwing"
-	       local dir_vec = dir_v_map[_self.dir+1]
+	       local dir_vec = dir_v_map[_self.dir]
 	       v_applyto(_self.pickup.vel,
-			 v_scale(dir_vec, 6))
+			 v_scale(dir_vec, 8))
 	       _self.pickup.state = "thrown"
 	       _self.pickup = nil
 	       _self.throwf = _self.throwttl
@@ -482,11 +533,19 @@ e_data = {
 	       _self.throwf -= 1
 	    end
 	 end
+	 
+	 v_scaleto(_self.vel_hit, .75)
+	 v_threshto(_self.vel_hit, .3)
+	 
+	 v_scaleto(_self.vel_geometry_bounce, .75)
+	 v_threshto(_self.vel_geometry_bounce, .5)
+	 -- todo z x
+	 _self.prev_z = z
       end,
       
       function (_self)
-	 print(_self.dir)
 	 e_rectfill(_self)
+	 print(_self.dir)
       end,
 
       b_dirs = {
@@ -498,11 +557,12 @@ e_data = {
       b_z=b_new(4),
       b_x=b_new(5),
       
-      pos = v_new(57,56),
+      pos = v_new(64,56),
       prev_vel = v_new(),
       vel = v_new(),
       vel_move = v_new(),
       vel_hit = v_new(),
+      vel_geometry_bounce = v_new(),
 	    
       width = 8,
       height = 8,
@@ -557,9 +617,11 @@ e_data = {
    attack = {
       function (_self)
 	 local wielder = _self.args[1]
-	 local dir = wielder.dir
-	 local dim = v_scale(dir_v_map[dir], 5)
-	 local dir_angle = dir_a_map[wielder.dir]
+	 local dir = _self.args[2]
+	 local charge_attack = _self.args[3]
+	 local dim = v_scale(dir_v_map[dir],
+			     charge_attack and 7 or 6)
+	 local dir_angle = dir_a_map[dir]
 	 
 	 if _self.f == 0 then
 	    _self.width = dim.x
@@ -570,13 +632,17 @@ e_data = {
 			-.25, .1) + dir_angle
 
 	 v_applyto(_self.pos,
-		   v_add(wielder.center, v_polar(a, 5)))
-	 
-	 if _self.f >
+		   v_add(v_flr(wielder.center),
+			 v_polar(a,
+				 charge_attack and 6 or 5)))
+
+	 if charge_attack or
+	    _self.f >
 	    _self.swing_duration + _self.charge_duration
 	 then
-	    _self.c = _self.f % 2 == 0 and 9 or 7   
+	    _self.c = flr(_self.f/8) % 2 == 0 and 9 or 10
 	 end
+	 
       end,
       
       function (_self)
@@ -594,6 +660,9 @@ e_data = {
    
    dummy = {
       function(_self)
+	 if _self.f == 0 then
+	    v_applyto(_self.pos, _self.args[1])
+	 end
 	 _self.vel.x = 0
 	 _self.vel.y = 0
 	 
@@ -610,30 +679,16 @@ e_data = {
 	    if _self.iframe == 0
 	       and _self.hp == 0 then
 	       e_drop(_self)
-	       local particle = e_init(e_data.particle, _self.pos)
-	    end
-	 end
-
-	 if _self.iframe == 0 then
-	    -- wonder behavior
-	    -- set wonder point
-	    if _self.wonder.x == 0 or
-	       thresh(_self.wonder.x - _self.pos.x, .5) == 0 and
-	       thresh(_self.wonder.y - _self.pos.y, .5) == 0 then
-	       local a = rnd(1)
-	       _self.wonder.x =
-		  clamp(round(_self.pos.x+cos(a)*20), 0, 127)
-	       _self.wonder.y =
-		  clamp(round(_self.pos.y+sin(a)*20), 0, 127)
+	       local particle =
+		  e_init(e_data.particle, _self.pos)
 	    end
 	 end
 	 
 	 _self.vel.x += _self.vel_hit.x
 	 _self.vel.y += _self.vel_hit.y
-	 _self.vel_hit.x *= .75
-	 _self.vel_hit.y *= .75
-	 _self.vel_hit.x = thresh(_self.vel_hit.x, .1)
-	 _self.vel_hit.y = thresh(_self.vel_hit.y, .1)	 
+	 v_addto(_self.vel, _self.vel_hit)
+	 v_scaleto(_self.vel_hit, .75)
+	 v_threshto(_self.vel_hit, .1)
 	 
 	 if _self.iframe == 0 then
 	    _self.vel_hit.x = 0
@@ -647,12 +702,12 @@ e_data = {
 	 e_rectfill(_self)
       end,
 
-      pos = v_new(30, 35),
+      pos = v_new(),
       width = 8,
       height = 8,
-      vel = v_new(0,0),
-      vel_hit = v_new(0,0),
-      wonder = v_new(0,0),
+      vel = v_new(),
+      vel_hit = v_new(),
+      wonder = v_new(),
       
       c = 4,
       iframe = 0,
@@ -663,19 +718,18 @@ e_data = {
       on_coll = function(_self, _other)
 	 if _other.type == "player_attack"
 	    and _self.iframe == 0 then
-	    local u = v_unit(v_sub(_self.center,
-				   _other.center))
-	    _self.vel_hit.x = u.x*5
-	    _self.vel_hit.y = u.y*5
+	    v_addto(_self.vel_hit,
+		    v_scaleto(
+		       v_unit(
+			  v_sub(
+			     _self.center,_other.center
+			  )
+		       ),
+		       2.5
+		    )
+	    )
 	    _self.iframe = _self.iframe_ttl
 	    _self.hp -= 1
-	 elseif _other.type == "geometry" then
-	    _self.pos.x -= _self.vel.x
-	    _self.pos.y -= _self.vel.y
-	    _self.vel_hit.x *= -1
-	    _self.vel_hit.y *= -1
-	    _self.vel_hit.x *= .5
-	    _self.vel_hit.y *= .5
 	 elseif _other.type == "pickup"
 	    and _other.state == "thrown"
 	    and _self.iframe == 0 then
@@ -698,8 +752,8 @@ e_data = {
 	       add(_self.particles, {
 		      pos = v_new(_self.pos.x+(rnd(1)-.5),
 				  _self.pos.y+(rnd(1)-.5)),
-		      vel = v_new(cos(lerp(i/3,0,1))*1.4+(rnd(1)-.5),
-				  sin(lerp(i/3,0,1))*1.4+(rnd(1)-.5))
+		      vel = v_new(cos(lerp(i/3,0,1))*1.2+(rnd(1)-.5),
+				  sin(lerp(i/3,0,1))*1.2+(rnd(1)-.5))
 	       })
 	    end
 	 end
@@ -715,11 +769,11 @@ e_data = {
 	 for particle in all(_self.particles) do
 	    circfill(particle.pos.x,
 		     particle.pos.y,
-		     lerp(_self.f/_self.ttl,3,0),
+		     lerp(_self.f/_self.ttl,2,0),
 		     flr(rnd(16)))
 	    circfill(particle.pos.x,
 		     particle.pos.y,
-		     lerp(_self.f/_self.ttl,2,0),
+		     lerp(_self.f/_self.ttl,1,0),
 		     flr(rnd(16)))
 	 end
       end,
@@ -728,25 +782,23 @@ e_data = {
    },
 
    pickup = {
-      function (_self)
-	 if _self.f == 0 then
-	    _self.pos.x = _self.args[1]
-	    _self.pos.y = _self.args[2]
-	 end
-	 
+      function (_self)	 
 	 if _self.state == "thrown" then
-	    v_addto(_self.pos, _self.vel)
-	    v_scaleto(_self.vel, .75)
-	    if thresh(_self.vel.x, .9) == 0
+	    if geometry_get(_self.center) != 0 or
+	       thresh(_self.vel.x, .9) == 0
 	       and thresh(_self.vel.y, .9) == 0 then
 	       e_drop(_self)
-	       local particle = e_init(e_data.particle, _self.pos)
+	       local particle =
+		  e_init(e_data.particle, _self.center)
+	    else
+	       v_addto(_self.pos, _self.vel)
+	       v_scaleto(_self.vel, .75)
 	    end
 	 end
       end,
       
       function (_self)
-	 spr(64,round(_self.pos.x),round(_self.pos.y))
+	 spr(64,flr(_self.pos.x),flr(_self.pos.y))
       end,
 
       pos = v_new(70, 40),
@@ -765,7 +817,8 @@ e_data = {
 entities = {}
 
 function e_init(_e_data, ...)
-   local e = shallow_copy(_e_data)
+   local e = deep_copy(_e_data)
+   e.center = v_new()
    e.f = 0
    e.alive = true
    e.args = {...}
@@ -782,14 +835,42 @@ player = nil
 dummy = nil
 pickup = nil
 
+
+function geometry_get(_v)
+   return geometry_map[flr(_v.y/8)+1][flr(_v.x/8)+1]
+end
+
+function geometry_set(_v, _value)
+   geometry_map[flr(_v.y/8)+1][flr(_v.x/8)+1] = _value
+end
+
+geometry_map = {
+   {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+   {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+   {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+}
+
 -- geometry_map = {
---    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
---    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
---    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
---    {0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
@@ -801,46 +882,68 @@ pickup = nil
 --    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 -- }
 
-geometry_map = {
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-   {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-} 
+-- geometry_map = {
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+-- }
+
+-- geometry_map = {
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+--    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+-- } 
 
 function _init()
    player = e_init(e_data.player)
    --e_init(e_data.pickup, 80, 63)
    -- e_init(e_data.pickup, 80, 71)
    -- e_init(e_data.pickup, 80, 55)   
-   --dummy = e_init(e_data.dummy)
+   --e_init(e_data.dummy, v_new(player.pos.x, player.pos.y-10))
+   --e_init(e_data.dummy, v_new(player.pos.x, player.pos.y+10))
+   -- e_init(e_data.dummy, v_new(player.pos.x-10, player.pos.y))
+   -- e_init(e_data.dummy, v_new(player.pos.x+10, player.pos.y))
 end
 
 function rectcoll(_coll_a, _coll_b)
    if _coll_a != _coll_b then
-      local ax1 = round(min(_coll_a.pos.x, _coll_a.pos.x + _coll_a.width))
-      local ax2 = round(max(_coll_a.pos.x, _coll_a.pos.x + _coll_a.width))
+      local ax1 = flr(min(_coll_a.pos.x, _coll_a.pos.x + _coll_a.width))
+      local ax2 = flr(max(_coll_a.pos.x, _coll_a.pos.x + _coll_a.width))
 
-      local bx1 = round(min(_coll_b.pos.x, _coll_b.pos.x + _coll_b.width))
-      local bx2 = round(max(_coll_b.pos.x, _coll_b.pos.x + _coll_b.width))
+      local bx1 = flr(min(_coll_b.pos.x, _coll_b.pos.x + _coll_b.width))
+      local bx2 = flr(max(_coll_b.pos.x, _coll_b.pos.x + _coll_b.width))
 
-      local ay1 = round(min(_coll_a.pos.y, _coll_a.pos.y + _coll_a.height))
-      local ay2 = round(max(_coll_a.pos.y, _coll_a.pos.y + _coll_a.height))
+      local ay1 = flr(min(_coll_a.pos.y, _coll_a.pos.y + _coll_a.height))
+      local ay2 = flr(max(_coll_a.pos.y, _coll_a.pos.y + _coll_a.height))
 
-      local by1 = round(min(_coll_b.pos.y, _coll_b.pos.y + _coll_b.height))
-      local by2 = round(max(_coll_b.pos.y, _coll_b.pos.y + _coll_b.height))
+      local by1 = flr(min(_coll_b.pos.y, _coll_b.pos.y + _coll_b.height))
+      local by2 = flr(max(_coll_b.pos.y, _coll_b.pos.y + _coll_b.height))
 
       if ax1 < bx2 and ax2 > bx1
 	 and ay1 < by2 and ay2 > by1 then
@@ -852,28 +955,33 @@ end
 
 frame_rate = 1
 f = 0
+function e_center(_e)
+   if _e.width and _e.height then
+      v_applyto(_e.center,
+		v_add(_e.pos,
+		      v_new((_e.width/2),(_e.height/2))))
+   end
+end
+
 function _update60()
    if f % frame_rate == 0 then
-   for entity in all(entities) do
-      entity[1](entity)
-      entity.f += 1
-      -- determine center
-      if entity.width and entity.height then
-	 entity.center = v_add(entity.pos,
-			       v_new((entity.width/2),
-				  (entity.height/2)))
+      for entity in all(entities) do
+	 e_center(entity)
+	 entity[1](entity)
+	 entity.f += 1
+	 -- determine center
+	 e_center(entity)
       end
-   end
 
-   for entity in all(entities) do
-      if entity.on_coll then
-	 for entity_b in all(entities) do
-	    if entity_b.on_coll then
-	       rectcoll(entity, entity_b)
+      for entity in all(entities) do
+	 if entity.on_coll then
+	    for entity_b in all(entities) do
+	       if entity_b.on_coll then
+		  rectcoll(entity, entity_b)
+	       end
 	    end
 	 end
       end
-   end
    end
    f+=1
 end
@@ -891,22 +999,31 @@ function _draw()
       -- geometry map
       for y,row in pairs(geometry_map) do
 	 for x,id in pairs(row) do
+	    local pos = v_new((x-1)*8, (y-1)*8)
 	    if id == 1 then
-	       rectfill((x-1)*8,
-		  (y-1)*8,
-		  (x-1)*8+7,
-		  (y-1)*8+7,y)
-	       rectfill((x-1)*8+1,
-		  (y-1)*8+1,
-		  (x-1)*8+6,
-		  (y-1)*8+6,x)
-	    end
+	       rectfill(pos.x,
+			pos.y,
+			pos.x+7,
+			pos.y+7,y)
+	       rectfill(pos.x+1,
+			pos.y+1,
+			pos.x+6,
+			pos.y+6,x)
+	    elseif id == 2 then
+	       spr(64, pos.x, pos.y)
+	    end	    
 	 end
       end
       
       for entity in all(entities) do
 	 entity[2](entity)
       end
+      -- debug mouse
+      poke(0x5F2D, 1)
+      local x,y = stat(32), stat(33)
+      pset(x,y,14)
+      print(x .. "," .. y)
+      print(flr(x/8)+1 .. "," .. flr(y/8)+1)
    end
 end
 
